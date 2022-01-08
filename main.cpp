@@ -32,13 +32,20 @@ public:
 int PORT = 9527;
 
 void BadRequest(int conn){
-    char szRes[] = "HTTP/1.0 400 BAD REQUEST\nContent-Type: text/html\n\n<!DOCTYPE html><html><head><title>400 BAD REQUEST</title></head><body><h1>400 BAD REQUEST</h1></body></html>";
+    char szRes[] = "HTTP/1.0 400 BAD REQUEST\nContent-Type: text/html\n\n";
     if (send(conn, szRes, strlen(szRes), 0) == -1)
     {
         cerr << "write error.\n";
         exit(1);
     }
-    cout << "Bad request sended.back.\n";
+    char body[] = "<!DOCTYPE html><html><head><title>400 BAD REQUEST</title></head><body><h1>400 BAD REQUEST</h1></body></html>";
+    if (send(conn, body, strlen(body), 0) == -1)
+    {
+        cerr << "write error.\n";
+        exit(1);
+    }
+    cout << "Bad request sended back.\n";
+    exit(0);
 }
 
 void parseRequest(int conn, char* szReq, Target& req){
@@ -125,6 +132,8 @@ int handleRequest(int conn){
             printf("%s file does not exist.\n", req.filename);      
         }
         printf("Open file %s successfully.\n", req.filename);
+        // read data
+
         // send response
     }
 }
