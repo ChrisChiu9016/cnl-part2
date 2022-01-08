@@ -122,8 +122,9 @@ int handleRequest(int conn){
             BadRequest(conn);
         }
         else if(fd < 0){
-            printf("Open file %s successfully.\n", req.filename);            
+            printf("%s file does not exist.\n", req.filename);      
         }
+        printf("Open file %s successfully.\n", req.filename);
         // send response
     }
 }
