@@ -25,7 +25,6 @@ public:
     char  filename[512];
     char  version[512];
     bool  hasRange;
-    int   size;
     int   start;
 };
 
@@ -33,31 +32,48 @@ int PORT = 9527;
 
 void BadRequest(int conn){
     char szRes[] = "HTTP/1.0 400 BAD REQUEST\nContent-Type: text/html\n\n";
-    if (send(conn, szRes, strlen(szRes), 0) == -1)
-    {
-        cerr << "write error.\n";
-        exit(1);
-    }
+    send(conn, szRes, strlen(szRes), MSG_NOSIGNAL);
+    
     char body[] = "<!DOCTYPE html><html><head><title>400 BAD REQUEST</title></head><body><h1>400 BAD REQUEST</h1></body></html>";
-    if (send(conn, body, strlen(body), 0) == -1)
-    {
-        cerr << "write error.\n";
-        exit(1);
-    }
+    send(conn, body, strlen(body), 0);
     cout << "Bad request sended back.\n";
-    exit(0);
+    exit(1);
 }
+void NotFound(int conn){
+    char szRes[] = "HTTP/1.0 404 NOT FOUND\nContent-Type: text/html\n\n";
+    send(conn, szRes, strlen(szRes), 0);
+    
+    char body[] = "<!DOCTYPE html><html><head><title>404 NOT FOUND</title></head><body><h1>404 NOT FOUND</h1></body></html>";
+    send(conn, body, strlen(body), MSG_NOSIGNAL);
+
+    cout << "404 NOT FOUND sended back.\n";
+    exit(1);
+}
+
 
 void parseRequest(int conn, char* szReq, Target& req){
     // setup struct for response
     string METHOD = "", targetFile = "", version = "";
-    char szRes[4096];
 
-    // get mothod, filename and protocol
-    char *request;
+    // check range in request
+    char* ptr;
+    if((ptr = strstr(szReq, "Range: bytes=")) == NULL){
+        cout << "no range in request.\n";
+        req.hasRange = false;
+        req.start = 0;
+    }
+    else{
+        cout << "find range in request.\n";
+        ptr = ptr + 13;
+        ptr = strtok(ptr, "-");
+        req.hasRange = true;
+        string start = ptr;
+        req.start = stoi(ptr);
+        cout << "start at: " << req.start << endl;
+    }
 
     // METHOD
-    request = strtok(szReq, " ");
+    char* request = strtok(szReq, " ");
     METHOD += request;
 
     // filename
@@ -82,37 +98,17 @@ void parseRequest(int conn, char* szReq, Target& req){
     strncpy(req.method, METHOD.c_str(), 20);
     strncpy(req.filename, targetFile.c_str(), 200);
     strncpy(req.version, version.c_str(), 20);
-
-    smatch range;
-    string input = szReq;
-    regex reg("Range: ([A-Za-z]*)=([0-9]*)-([0-9]*)");
-    if(regex_match(input, range, reg)){
-        if(range.str(1) != "bytes"){
-            BadRequest(conn);
-        }
-        else{
-            req.hasRange = true;
-            char *p;
-            req.start = stoi(range.str(2));
-            req.size = stoi(range.str(3)) - req.start;
-        }
-    }
-    else{
-        req.hasRange = false;
-        req.size = 0;
-        req.start = 0;
-    }
 }
 
-int handleRequest(int conn){
-    char szReq[4096]{'\0'} ,szRes[4096]{'\0'};
+void handleRequest(int conn){
+    char szReq[4096]{'\0'};
     while(1){
         memset(szReq, 0, sizeof(szReq));
 
         int ret = read(conn, szReq, sizeof(szReq));
         if(ret == 0){
             // 客戶端關閉
-            printf("client closed.\n");
+            printf("client closed.\n\n");
             break;
         }
         else if(ret == -1){
@@ -123,18 +119,120 @@ int handleRequest(int conn){
         fputs(szReq, stdout);
         Target req;
         parseRequest(conn, szReq, req);
-        cout << req.filename << endl;
-        int fd = open(req.filename, O_RDONLY);
-        if(req.method != "GET" || req.version != "HTTP/1.1"){
+        if(strcmp(req.method, "GET") || strcmp(req.version, "HTTP/1.1")){
+            cerr << "invalid method or http version.\n";
             BadRequest(conn);
         }
-        else if(fd < 0){
-            printf("%s file does not exist.\n", req.filename);      
-        }
-        printf("Open file %s successfully.\n", req.filename);
-        // read data
 
-        // send response
+        // 判斷出正確的Content-Type
+        char type[20];
+        if(strstr(req.filename, ".mp4") != NULL){
+            strcpy(type, "video/mp4");
+        }
+        else if(strstr(req.filename, ".html") != NULL){
+            strcpy(type, "text/html");
+        }
+
+        // 判斷是否需要Range Request
+        char szRes[4096]{'\0'};
+        memset(szRes, 0, 4096);
+        if(strcmp(type, "video/mp4") == 0){
+            // 讀檔
+            FILE *fd = fopen(req.filename, "rb+");
+            if(fd == NULL){
+                printf("%s file does not exist.\n", req.filename); 
+                NotFound(conn);
+                exit(1);     
+            }
+            cout << "open file successfully.\n";
+
+            // 獲得檔案大小
+            fseek(fd, 0L, SEEK_END);
+            int file_len = ftell(fd);
+            fseek(fd, 0, SEEK_SET);
+
+            if(!req.hasRange){  // 第一次的Request
+                cout << "send headers with code 200.\n";
+                snprintf(szRes, 4096, 
+                    "HTTP/1.1 200 OK\nContent-Type: %s\n"
+                    "Content-Length: %d\n"
+                    "Accept-Ranges: bytes\n\n", 
+                    type, file_len);
+                send(conn, szRes, strlen(szRes), MSG_NOSIGNAL);
+            }
+            else{
+                // 斷點續傳
+                long content_left = file_len - req.start;
+                int chunk_size = 1024*64;   // 64B
+                int chunk_num = content_left / chunk_size;
+                if(content_left % chunk_size != 0){
+                    chunk_num++;
+                }
+                // 傳送檔案時全部都要傳，但是分成小部份多次
+                for(int i = 0; i < chunk_num; i++){
+                    if(i+1 == chunk_num){
+                        chunk_size = file_len - req.start;
+                    }
+                    snprintf(szRes, 4096, 
+                        "HTTP/1.1 206 Partial Content\n"
+                        "Content-Type: %s\n"
+                        "Content-Length: %d\n"
+                        "Content-Range: bytes %d-%d/%d\n"
+                        "Accept-Ranges: bytes\n\n", 
+                        type, chunk_size, req.start, req.start+chunk_size-1, file_len);
+                    send(conn, szRes, strlen(szRes), MSG_NOSIGNAL);
+
+                    // 讀取檔案內容至容器內        
+                    // 當宣告陣列時，需宣告大小，避免記憶體分配出現錯誤導致出錯
+                    char szBuf[chunk_size]{'\0'};
+                    // 跳到指定的範圍
+                    fseek(fd, req.start, SEEK_SET);
+                    if(fread(szBuf, 1, chunk_size, fd) == 0){
+                        cout << "read file error.\n";
+                        exit(1);
+                    }
+                    // Linux與Windows下的send返回值有差別，不需要檢查
+                    send(conn, szBuf, sizeof(szBuf), MSG_NOSIGNAL);
+                    req.start += chunk_size;
+                    memset(szBuf, 0, sizeof(szBuf));
+                }
+            
+                cout << "send file complete!\n\n";
+            }
+        }
+        else{
+            // 讀檔
+            FILE *fd = fopen(req.filename, "r");
+            if(fd == NULL){
+                printf("%s file does not exist.\n", req.filename); 
+                NotFound(conn);
+                exit(1);     
+            }
+            cout << "open file successfully.\n";
+
+            // 獲得文件大小
+            fseek(fd, 0L, SEEK_END);
+            int file_len = ftell(fd);
+            fseek(fd, 0, SEEK_SET);
+
+            // headers回傳
+            snprintf(szRes, 4096, "HTTP/1.1 200 OK\nContent-Type: %s\nContent-Length: %d\nAccept-Ranges: bytes\n\n", type, file_len);
+            send(conn, szRes, strlen(szRes), MSG_NOSIGNAL);
+            cout << "send headers with code 200.\n";
+
+            // 讀取檔案內容至容器內
+            cout << "sending html...\n";
+            // 當宣告陣列時，需宣告大小，避免記憶體分配出現錯誤導致出錯
+            char szBuf[file_len]{'\0'};
+            memset(szBuf, 0, sizeof(szBuf));
+
+            if(fread(szBuf, 1, file_len, fd) == 0){
+                cout << "read file error.\n";
+                exit(1);
+            }
+            send(conn, szBuf, sizeof(szBuf), 0);
+            cout << "sending successfully!\n";
+        }       
     }
 }
 
@@ -182,15 +280,14 @@ int main(int argc, char* argv[]){
 
     if(bind(sock, (struct sockaddr*)&sin, sizeof(sin))<0){
         cerr << "bind error.\n";
+        return -1;
     }
     
     // tell winsock the socket is for listening
     if(listen(sock, SOMAXCONN)<0){
         cerr << "listen error.\n";
+        return -1;
     }
-
-    // while loop
-    char szBuf[4096]{'\0'};
 
     // wait for a connection
     sockaddr_in client;
@@ -226,10 +323,14 @@ int main(int argc, char* argv[]){
 }
 
 /*            ---code reference---           *
+https://developerweb.net/viewtopic.php?id=5843 重要
+https://www.twblogs.net/a/5c56d056bd9eee06ef3686e4 最重要的關鍵
 https://www.kshuang.xyz/doku.php/programming:c:socket
 https://bbs.csdn.net/topics/370091221          
 https://www.itread01.com/content/1547180673.html
 https://www.itread01.com/content/1548101702.html
 https://www.itread01.com/p/168113.html
+https://stackoverflow.com/questions/13043816/html5-video-and-partial-range-http-requests
 https://stackoverflow.com/questions/9197689/invalid-conversion-from-int-to-socklen
+https://iter01.com/68377.html 補充閱讀資料
 */
